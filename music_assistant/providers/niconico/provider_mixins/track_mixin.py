@@ -108,7 +108,26 @@ class NiconicoMusicProviderTrackMixin(NiconicoMusicProviderMixinBase):
             can_seek=True,
             # If an expiring URL is used, it may not play when pausing and resuming.
             enable_cache=True,
+            # Add video URL for MV functionality if available
+            video_url=stream_format.get("video_url"),
         )
+
+        # Add video authentication information to streamdetails for video streaming
+        if stream_format.get("video_url"):
+            cookies = stream_format.get("cookies")
+            user_agent = stream_format.get("user_agent")
+
+            video_extra_args = [
+                "-user_agent",
+                str(user_agent),
+                "-referer",
+                "https://www.nicovideo.jp/",
+                "-headers",
+                "Cookie: " + str(cookies) + "\r\n",
+            ]
+
+            # Store video auth info in a way the streaming controller can access
+            stream_details.video_extra_args = [str(arg) for arg in video_extra_args]
 
         if (
             stream_format.get("audio_channels")

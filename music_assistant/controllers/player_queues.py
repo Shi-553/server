@@ -1274,6 +1274,16 @@ class PlayerQueuesController(CoreController):
                 duration = duration - queue_item.streamdetails.seek_position
         else:
             duration = queue_item.duration
+        custom_data = None
+        if queue_item.streamdetails and queue_item.streamdetails.video_url:
+            # Convert NicoNico video URL to server-proxy URL for CORS/auth handling
+            video_proxy_url = self.mass.streams.get_video_url(
+                queue.session_id,
+                queue_item.queue_id,
+                queue_item.queue_item_id,
+            )
+            custom_data = {"video_url": video_proxy_url}
+
         media = PlayerMedia(
             uri=await self.mass.streams.resolve_stream_url(
                 queue.session_id, queue_item, flow_mode=flow_mode
@@ -1284,6 +1294,7 @@ class PlayerQueuesController(CoreController):
             duration=duration,
             queue_id=queue_item.queue_id,
             queue_item_id=queue_item.queue_item_id,
+            custom_data=custom_data,
         )
         if not flow_mode and queue_item.media_item:
             media.title = queue_item.media_item.name
@@ -1756,6 +1767,17 @@ class PlayerQueuesController(CoreController):
             queue.current_index = current_index
             queue.current_item = current_item = self.get_item(queue_id, current_index)
             queue.next_item = self.get_next_item(queue_id, current_index) if current_item else None
+
+            # Update player's current_media with video URL info from queue item
+            if current_item and current_item.streamdetails:
+                player_obj = self.mass.players.get(queue_id)
+                if player_obj and current_item.streamdetails.video_url:
+                    # Update player's current_media asynchronously
+                    async def update_player_media():
+                        player_media = await self.player_media_from_queue_item(current_item, False)
+                        player_obj.current_media = player_media
+
+                    self.mass.create_task(update_player_media())
 
             # correct elapsed time when seeking
             if (

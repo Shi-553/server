@@ -311,6 +311,11 @@ class StreamsController(CoreController):
                     "/pluginsource/{plugin_source}/{player_id}.{fmt}",
                     self.serve_plugin_source_stream,
                 ),
+                (
+                    "*",
+                    "/video/{session_id}/{queue_id}/{queue_item_id}.{fmt}",
+                    self.serve_video_stream,
+                ),
             ],
         )
 
@@ -746,6 +751,225 @@ class StreamsController(CoreController):
                 break
         return resp
 
+    async def serve_video_stream(self, request: web.Request) -> web.Response:
+        """Stream video for NicoNico MV functionality."""
+        self._log_request(request)
+        session_id = request.match_info["session_id"]
+        queue_id = request.match_info["queue_id"]
+        queue_item_id = request.match_info["queue_item_id"]
+
+        # Get the queue and validate session (same as audio stream)
+        queue = self.mass.player_queues.get(queue_id)
+        if not queue:
+            raise web.HTTPNotFound(reason=f"Unknown Queue: {queue_id}")
+        if queue.session_id and session_id != queue.session_id:
+            raise web.HTTPNotFound(reason=f"Unknown (or invalid) session: {session_id}")
+
+        # Get the queue item (same as audio stream)
+        queue_item = self.mass.player_queues.get_item(queue_id, queue_item_id)
+        if not queue_item:
+            raise web.HTTPNotFound(reason=f"Unknown Queue item: {queue_item_id}")
+
+        # Get streamdetails if not available (same as audio stream)
+        if not queue_item.streamdetails:
+            try:
+                from music_assistant.helpers.audio import get_stream_details
+
+                queue_item.streamdetails = await get_stream_details(
+                    mass=self.mass, queue_item=queue_item
+                )
+            except Exception as e:
+                self.logger.error(
+                    "Failed to get streamdetails for QueueItem %s: %s", queue_item_id, e
+                )
+                raise web.HTTPNotFound(reason=f"No streamdetails for Queue item: {queue_item_id}")
+
+        if not queue_item.streamdetails or not queue_item.streamdetails.video_url:
+            raise web.HTTPNotFound(reason="Video URL not available")
+
+        self.logger.debug(
+            "Start serving video stream for %s - video URL: %s",
+            queue_item.name,
+            queue_item.streamdetails.video_url,
+        )
+
+        # Extract headers and cookies from streamdetails for NicoNico authentication
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://www.nicovideo.jp/",
+        }
+
+        # Use video-specific authentication if available
+        auth_args = queue_item.streamdetails.video_extra_args
+        if not auth_args:
+            # Fallback to regular extra_input_args
+            auth_args = queue_item.streamdetails.extra_input_args
+
+        # Parse authentication arguments
+        if auth_args:
+            for i, arg in enumerate(auth_args):
+                if arg == "-user_agent" and i + 1 < len(auth_args):
+                    headers["User-Agent"] = auth_args[i + 1]
+                elif arg == "-headers" and i + 1 < len(auth_args):
+                    cookie_header = auth_args[i + 1]
+                    if "Cookie:" in cookie_header:
+                        cookie_value = cookie_header.split("Cookie: ")[1].split("\r\n")[0]
+                        headers["Cookie"] = cookie_value
+                        self.logger.debug("Found cookies for video stream authentication")
+
+        self.logger.debug(
+            "Video stream headers: User-Agent=%s, Cookie=%s",
+            headers.get("User-Agent", "None"),
+            "Present" if headers.get("Cookie") else "None",
+        )
+
+        # Use ffmpeg to proxy the video stream from NicoNico (similar to audio streams)
+        # This handles HLS properly including manifest rewriting and authentication
+        try:
+            from music_assistant.helpers.ffmpeg import AsyncProcess
+
+            # Set up input arguments for ffmpeg (authentication headers)
+            extra_input_args = []
+            if auth_args:
+                extra_input_args.extend(auth_args)
+
+            # Setup response headers for MP4 streaming
+            response_headers = {
+                "Content-Type": "video/mp4",
+                "Accept-Ranges": "bytes",
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "no-cache",
+            }
+
+            resp = web.StreamResponse(
+                status=200,
+                reason="OK",
+                headers=response_headers,
+            )
+
+            await resp.prepare(request)
+
+            # return early if this is not a GET request
+            if request.method != "GET":
+                return resp
+
+            # Calculate dynamic chunk size and settings based on video quality estimation
+            base_chunk_size = 32768  # 32KB base (smaller for better responsiveness)
+
+            # Try to estimate video bitrate from URL or use conservative default
+            estimated_bitrate_kbps = 1500  # Conservative default
+            use_rate_limit = False  # Only use -re for high quality videos
+
+            if "high" in queue_item.streamdetails.video_url.lower():
+                estimated_bitrate_kbps = 3000
+                use_rate_limit = True  # High quality needs rate limiting
+            elif "low" in queue_item.streamdetails.video_url.lower():
+                estimated_bitrate_kbps = 800
+                use_rate_limit = False  # Low quality should stream fast
+            elif "medium" in queue_item.streamdetails.video_url.lower():
+                estimated_bitrate_kbps = 1500
+                use_rate_limit = False  # Medium quality without rate limiting
+
+            # Adjust chunk size based on estimated bitrate
+            if estimated_bitrate_kbps <= 1000:
+                dynamic_chunk_size = base_chunk_size  # Small chunks for low quality
+            else:
+                dynamic_chunk_size = min(
+                    base_chunk_size * 2, base_chunk_size + (estimated_bitrate_kbps // 20)
+                )
+
+            # Build ffmpeg args for optimized video streaming
+            ffmpeg_args = [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostats",
+                "-ignore_unknown",
+                "-protocol_whitelist",
+                "file,hls,http,https,tcp,tls,crypto,pipe,data,fd,rtp,udp,concat",
+                "-probesize",
+                "4096",  # Smaller probe size for faster startup
+                "-analyzeduration",
+                "1000000",  # Reduced analysis duration (1 second)
+            ]
+
+            # Only add rate limiting for high quality videos
+            if use_rate_limit:
+                ffmpeg_args.append("-re")  # Read input at native frame rate (only for high quality)
+
+            # Add input arguments (authentication)
+            if extra_input_args:
+                ffmpeg_args.extend(extra_input_args)
+
+            # Add input source
+            ffmpeg_args.extend(["-i", queue_item.streamdetails.video_url])
+
+            # Add output arguments (optimized MP4 streaming format)
+            ffmpeg_args.extend(
+                [
+                    "-c:v",
+                    "copy",  # Copy video stream
+                    "-c:a",
+                    "copy",  # Copy audio stream
+                    "-f",
+                    "mp4",  # MP4 output format
+                    "-movflags",
+                    "frag_keyframe+empty_moov+faststart",  # Progressive streaming (no dash)
+                    "-fflags",
+                    "+genpts+flush_packets",  # Generate PTS and flush packets for better streaming
+                    "-avoid_negative_ts",
+                    "make_zero",  # Avoid negative timestamps
+                    "-max_muxing_queue_size",
+                    "512",  # Smaller queue size for lower latency
+                    "-",  # Output to stdout
+                ]
+            )
+
+            bytes_streamed = 0
+
+            self.logger.debug(
+                "Video streaming: chunk=%d bytes, bitrate=%d kbps, rate_limit=%s",
+                dynamic_chunk_size,
+                estimated_bitrate_kbps,
+                use_rate_limit,
+            )
+
+            # Stream video using direct ffmpeg process
+            async with AsyncProcess(
+                ffmpeg_args,
+                stdin=False,
+                stdout=True,
+                stderr=True,
+            ) as ffmpeg_proc:
+                await ffmpeg_proc.start()
+
+                chunk_count = 0
+                async for chunk in ffmpeg_proc.iter_chunked(dynamic_chunk_size):
+                    try:
+                        await resp.write(chunk)
+                        bytes_streamed += len(chunk)
+                        chunk_count += 1
+
+                        # More frequent yield for better responsiveness, especially for low quality
+                        if chunk_count % 3 == 0:  # Yield every 3 chunks instead of every 10
+                            await asyncio.sleep(0.0001)  # Shorter sleep (0.1ms)
+
+                    except (BrokenPipeError, ConnectionResetError, ConnectionError):
+                        self.logger.debug("Client disconnected during video stream")
+                        break
+
+            self.logger.debug(
+                "Finished serving video stream for %s - %d bytes streamed",
+                queue_item.name,
+                bytes_streamed,
+            )
+            return resp
+
+        except Exception as e:
+            self.logger.error("Error streaming video for %s: %s", queue_item.name, e)
+            raise web.HTTPInternalServerError(reason=f"Video streaming error: {e}")
+
     def get_command_url(self, player_or_queue_id: str, command: str) -> str:
         """Get the url for the special command stream."""
         return f"{self.base_url}/command/{player_or_queue_id}/{command}.mp3"
@@ -763,6 +987,16 @@ class StreamsController(CoreController):
         # this ensures playback on all players, including ones that do not
         # like https hosts and it also offers the pre-announce 'bell'
         return f"{self.base_url}/announcement/{player_id}.{content_type.value}?pre_announce={use_pre_announce}"  # noqa: E501
+
+    def get_video_url(
+        self,
+        session_id: str,
+        queue_id: str,
+        queue_item_id: str,
+        content_type: str = "mp4",
+    ) -> str:
+        """Get the url for the video stream."""
+        return f"{self.base_url}/video/{session_id}/{queue_id}/{queue_item_id}.{content_type}"
 
     async def get_queue_flow_stream(
         self,

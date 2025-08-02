@@ -90,12 +90,27 @@ class NiconicoVideoAdapter(NiconicoBaseAdapter):
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 try:
                     info = ydl.extract_info(url, download=False)
-                    best_format = next(
-                        (f for f in info["formats"] if f.get("acodec") != "none"), None
-                    )
+                    # Get best audio format (search from the end for highest quality)
+                    audio_formats = [f for f in info["formats"] if f.get("acodec") != "none"]
+                    best_format = audio_formats[-1] if audio_formats else None
                     if not best_format:
                         raise UnplayableMediaError("No suitable audio stream found")
-                    return {
+
+                    # Also try to extract video URL for MV functionality
+                    # Get second lowest quality video format
+                    # (second from beginning for moderate quality)
+                    video_formats = [
+                        f
+                        for f in info["formats"]
+                        if f.get("vcodec") != "none" and f.get("acodec") == "none"
+                    ]
+                    video_format = (
+                        video_formats[1]
+                        if len(video_formats) > 1
+                        else (video_formats[0] if video_formats else None)
+                    )
+
+                    result = {
                         "url": best_format["url"],
                         "audio_ext": best_format["ext"],
                         "audio_channels": best_format.get("channels"),
@@ -104,6 +119,13 @@ class NiconicoVideoAdapter(NiconicoBaseAdapter):
                         "user_agent": best_format["http_headers"].get("User-Agent", "Mozilla/5.0"),
                         "duration": info.get("duration"),
                     }
+
+                    # Add video URL if available
+                    if video_format:
+                        result["video_url"] = video_format["url"]
+                        result["video_ext"] = video_format["ext"]
+
+                    return result
                 except Exception as err:
                     raise UnplayableMediaError(f"Niconico extract error: {err}") from err
 
