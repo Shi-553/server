@@ -8,6 +8,9 @@
 		},
 		{
 			"path": "../../../../musicassistant_frountend"
+		},
+		{
+			"path": "../../../../niconico.py"
 		}
 	],
 	"settings": {},
