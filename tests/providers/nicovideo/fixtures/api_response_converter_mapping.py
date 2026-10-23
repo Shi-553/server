@@ -53,6 +53,8 @@ API_RESPONSE_CONVERTER_MAPPINGS = (
         source_type=EssentialVideo,
         convert_func=lambda data, cm: cm.track.convert_by_essential_video(data),
     ),
+    # Without lazy data (owner/series fetch failed); the full conversion with lazy data
+    # is covered by test_convert_by_watch_data_with_lazy_data and the stream fixture
     APIResponseConverterMapping(
         source_type=WatchData,
         convert_func=lambda data, cm: cm.track.convert_by_watch_data(data),
@@ -163,6 +165,7 @@ API_RESPONSE_CONVERTER_MAPPINGS = (
         convert_func=lambda data, cm: cm.stream.convert_from_conversion_data(
             StreamConversionData(
                 watch_data=data.watch_data,
+                watch_lazy_data=data.watch_lazy_data,
                 selected_audio=data.selected_audio,
                 hls_url="https://example.com/stub.m3u8",
                 domand_bid="stub_bid",

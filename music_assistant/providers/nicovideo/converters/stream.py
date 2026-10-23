@@ -9,7 +9,8 @@ from music_assistant_models.errors import UnplayableMediaError
 from music_assistant_models.streamdetails import StreamDetails, StreamMetadata
 from niconico.objects.video.watch import (  # noqa: TC002 - Using by StreamConversionData(BaseModel Serialization)
     WatchData,
-    WatchMediaDomandAudio,
+    WatchLazyData,
+    WatchMediaAudio,
 )
 from pydantic import BaseModel
 
@@ -39,7 +40,8 @@ class StreamConversionData(BaseModel):
     """Data needed for StreamDetails conversion."""
 
     watch_data: WatchData
-    selected_audio: WatchMediaDomandAudio
+    watch_lazy_data: WatchLazyData | None
+    selected_audio: WatchMediaAudio
     hls_url: str
     domand_bid: str
     hls_playlist_text: str
@@ -71,7 +73,9 @@ class NicovideoStreamConverter(NicovideoConverterBase):
         video_id = watch_data.video.id_
 
         # Get track information for stream metadata
-        track = self.converter_manager.track.convert_by_watch_data(watch_data)
+        track = self.converter_manager.track.convert_by_watch_data(
+            watch_data, conversion_data.watch_lazy_data
+        )
         if not track:
             raise UnplayableMediaError(f"Cannot convert track data for video {video_id}")
 

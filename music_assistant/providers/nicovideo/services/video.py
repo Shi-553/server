@@ -20,7 +20,7 @@ from music_assistant.providers.nicovideo.services.base import NicovideoBaseServi
 if TYPE_CHECKING:
     from music_assistant_models.media_items import Track
     from music_assistant_models.streamdetails import StreamDetails
-    from niconico.objects.video.watch import WatchData, WatchMediaDomandAudio
+    from niconico.objects.video.watch import WatchData, WatchLazyData, WatchMediaAudio
 
     from music_assistant.providers.nicovideo.services.manager import NicovideoServiceManager
 
@@ -59,7 +59,8 @@ class NicovideoVideoService(NicovideoBaseService):
         )
 
         if watch_data:
-            return self.converter_manager.track.convert_by_watch_data(watch_data)
+            watch_lazy_data = await self._get_watch_lazy_data(watch_data)
+            return self.converter_manager.track.convert_by_watch_data(watch_data, watch_lazy_data)
 
         return None
 
@@ -76,6 +77,7 @@ class NicovideoVideoService(NicovideoBaseService):
         )
         if not watch_data:
             raise UnplayableMediaError("Failed to fetch watch data")
+        watch_lazy_data = await self._get_watch_lazy_data(watch_data)
 
         # 2. Select best available audio
         selected_audio = self._select_best_audio(watch_data)
@@ -94,17 +96,30 @@ class NicovideoVideoService(NicovideoBaseService):
         # 6. Return conversion data
         return StreamConversionData(
             watch_data=watch_data,
+            watch_lazy_data=watch_lazy_data,
             selected_audio=selected_audio,
             hls_url=hls_url,
             domand_bid=domand_bid,
             hls_playlist_text=playlist_text,
         )
 
-    def _select_best_audio(self, watch_data: WatchData) -> WatchMediaDomandAudio:
+    async def _get_watch_lazy_data(self, watch_data: WatchData) -> WatchLazyData | None:
+        """Get the lazily loaded owner and series data of a video, or None if unavailable."""
+        watch_lazy_data = await self.service_manager._call_with_throttler(
+            self.niconico_py_client.video.watch.get_watch_lazy_data, watch_data
+        )
+        if watch_lazy_data is None:
+            self.logger.debug(
+                "No lazy watch data for video %s, continuing without owner and series",
+                watch_data.video.id_,
+            )
+        return watch_lazy_data
+
+    def _select_best_audio(self, watch_data: WatchData) -> WatchMediaAudio:
         """Select the best available audio from WatchData."""
         best_audio = None
         best_quality = -1
-        for audio in watch_data.media.domand.audios:
+        for audio in watch_data.media.contents.audios:
             if audio.is_available and audio.quality_level > best_quality:
                 best_audio = audio
                 best_quality = audio.quality_level
@@ -114,9 +129,7 @@ class NicovideoVideoService(NicovideoBaseService):
 
         return best_audio
 
-    async def _get_hls_url(
-        self, watch_data: WatchData, selected_audio: WatchMediaDomandAudio
-    ) -> str:
+    async def _get_hls_url(self, watch_data: WatchData, selected_audio: WatchMediaAudio) -> str:
         """Get HLS URL for selected audio."""
         # Create outputs list with selected audio ID only (audio-only)
         outputs = [selected_audio.id_]
