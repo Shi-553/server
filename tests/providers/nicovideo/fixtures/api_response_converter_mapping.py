@@ -21,7 +21,7 @@ from niconico.objects.nvapi import (
 )
 from niconico.objects.user import NicoUser, UserMylistItem, UserSeriesItem
 from niconico.objects.video import EssentialVideo, Mylist
-from niconico.objects.video.watch import WatchData
+from niconico.objects.video.watch import WatchData, WatchLazyData
 from pydantic import BaseModel
 
 from music_assistant.providers.nicovideo.converters.stream import (
@@ -189,6 +189,11 @@ API_RESPONSE_CONVERTER_MAPPINGS = (
 )
 
 
+# Types whose fixtures have no conversion of their own and are only used together with
+# another fixture (e.g. WatchLazyData in test_convert_by_watch_data_with_lazy_data)
+COMPANION_FIXTURE_TYPES: frozenset[type[BaseModel]] = frozenset({WatchLazyData})
+
+
 class APIResponseConverterMappingRegistry:
     """Maps API response types to converter functions."""
 
@@ -199,6 +204,10 @@ class APIResponseConverterMappingRegistry:
             self._registry[mapping.source_type] = cast(
                 "APIResponseConverterMapping[BaseModel]", mapping
             )
+
+    def is_companion_type(self, source_type: type) -> bool:
+        """Return whether fixtures of this type are only used together with other fixtures."""
+        return source_type in COMPANION_FIXTURE_TYPES
 
     def get_by_type(self, source_type: type) -> APIResponseConverterMapping[BaseModel] | None:
         """Get mapping by type with O(1) lookup."""

@@ -132,6 +132,9 @@ class ConverterTestRunner:
     def _process_single_fixture(self, fixture_id: str, fixture: BaseModel) -> None:
         """Process a single fixture within a fixture file."""
         try:
+            if self.mapping_registry.is_companion_type(type(fixture)):
+                return
+
             # Get mapping directly by type
             mapping = self.mapping_registry.get_by_type(type(fixture))
             if mapping is None:
