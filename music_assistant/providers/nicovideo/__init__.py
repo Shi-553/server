@@ -10,9 +10,9 @@ from music_assistant.mass import MusicAssistant
 from music_assistant.models import ProviderInstanceType
 from music_assistant.providers.nicovideo.provider import NicovideoMusicProvider
 
-# TODO: manifest.json pins niconico.py-ma to a git commit of Shi-553/niconico.py#3
-# (watch v4 API support). Switch back to the released niconico.py-ma version on PyPI
-# once it is published.
+# TODO: manifest.json pins niconico.py-ma to a git commit of Shi-553/niconico.py that has
+# the watch v4 API support (#3) and the removal of mail login (#5, brought into main by #6).
+# Switch back to the released niconico.py-ma version on PyPI once it is published.
 
 if TYPE_CHECKING:
     from music_assistant_models.config_entries import ProviderConfig
